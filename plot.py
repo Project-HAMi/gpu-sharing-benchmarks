@@ -7,6 +7,7 @@ Use --language zh for Chinese labels and --font to select a Chinese font file.
 
 import argparse
 import hashlib
+from io import BytesIO
 import json
 import math
 from pathlib import Path
@@ -83,6 +84,22 @@ def save_figure(figure, output_dir, name, title, description, plotted, preview):
     print(f"Saved {output}")
 
 
+def expand_y_limits(axis, minimum_top):
+    bottom, top = axis.get_ylim()
+    bottom, top = min(0, bottom), max(minimum_top, top)
+    axis.set_ylim(bottom, top)
+    if axis.texts:
+        axis.figure.canvas.draw()
+        renderer = axis.figure.canvas.get_renderer()
+        for label in axis.texts:
+            # Text has a fixed display height; reserve that fraction of the
+            # axes above its data anchor even when the data range expands.
+            height_fraction = label.get_window_extent(renderer).height / axis.bbox.height
+            required_top = bottom + (label.get_position()[1] - bottom) / (1 - height_fraction)
+            top = max(top, required_top)
+        axis.set_ylim(bottom, top)
+
+
 def draw(data_dir, output_dir, preview, font_path, language):
     configure_fonts(font_path, language)
     labels = {
@@ -101,11 +118,12 @@ def draw(data_dir, output_dir, preview, font_path, language):
             "series": [item[1] for item in SERIES],
         },
     }[language]
-    controlled = pd.read_csv(data_dir / "controlled.csv").set_index(
+    sources = {name: (data_dir / name).read_bytes() for name in INPUT_FILES}
+    controlled = pd.read_csv(BytesIO(sources["controlled.csv"])).set_index(
         ["mode", "configuration"]
     )
-    regular = pd.read_csv(data_dir / "fullstack.csv")
-    unlimited = pd.read_csv(data_dir / "fullstack-unlimited.csv")
+    regular = pd.read_csv(BytesIO(sources["fullstack.csv"]))
+    unlimited = pd.read_csv(BytesIO(sources["fullstack-unlimited.csv"]))
     regular = pd.concat([
         regular,
         unlimited[unlimited["configuration"] == "HAMi pair"],
@@ -133,7 +151,7 @@ def draw(data_dir, output_dir, preview, font_path, language):
     fixed_figure.subplots_adjust(left=0.09, right=0.98, top=0.86, bottom=0.18, wspace=0.27)
     regular_figure, regular_axes = plt.subplots(1, 2, figsize=(10.5, 4.8))
     regular_figure.subplots_adjust(left=0.09, right=0.98, top=0.88, bottom=0.32, wspace=0.27)
-    hashes = {name: hashlib.sha256((data_dir / name).read_bytes()).hexdigest() for name in INPUT_FILES}
+    hashes = {name: hashlib.sha256(sources[name]).hexdigest() for name in INPUT_FILES}
     fixed_plotted = {
         "source_sha256": {"controlled.csv": hashes["controlled.csv"]},
         "controlled": [],
@@ -157,8 +175,6 @@ def draw(data_dir, output_dir, preview, font_path, language):
         bars[0].set_hatch("///")
         bars[2].set_hatch("..")
         axis.set_xticks(range(4), labels["bars"])
-        axis.set_ylim(0, 700)
-        axis.set_yticks(range(0, 701, 100))
         axis.set_title(f"({'ab'[column]}) {labels['fixed']} · {mode}", pad=12)
         axis.set_ylabel(labels["throughput"])
         for x, (key, row) in enumerate(values.iterrows()):
@@ -166,6 +182,9 @@ def draw(data_dir, output_dir, preview, font_path, language):
             axis.text(x, mean + std + 13, f"{mean:.2f}", ha="center", va="bottom", fontsize=10)
             bars[x].set_gid(f"controlled-{mode}-{x}")
             fixed_plotted["controlled"].append({"mode": mode, "configuration": key, "mean": mean, "sample_std": std})
+        expand_y_limits(axis, 700)
+        if axis.get_ylim() == (0, 700):
+            axis.set_yticks(range(0, 701, 100))
         axis.set_axisbelow(True)
         axis.grid(axis="y", color="0.88", linewidth=0.5)
 
@@ -189,7 +208,7 @@ def draw(data_dir, output_dir, preview, font_path, language):
         axis.xaxis.set_major_locator(FixedLocator(levels))
         axis.xaxis.set_major_formatter(ScalarFormatter())
         axis.minorticks_off()
-        axis.set_ylim(0, 1200 if mode == "Graph" else 700)
+        expand_y_limits(axis, 1200 if mode == "Graph" else 700)
         axis.set_title(f"({'ab'[column]}) {labels['regular']} · {mode}", pad=12)
         axis.set_xlabel(labels["concurrency"])
         axis.set_ylabel(labels["throughput"])

@@ -10,12 +10,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "results/2026-11-a100-sharing"
 FILES = ("controlled.csv", "fullstack.csv", "fullstack-unlimited.csv")
+sys.path.insert(0, str(ROOT))
+import plot
+
+
 FIGURES = ("gpu-sharing-benchmarks-fixed-cache", "gpu-sharing-benchmarks-standard")
 
 
@@ -78,6 +83,71 @@ class PlotTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for figure, original in originals.items():
             self.assertEqual(original, (output_dir / f"{figure}.svg").read_bytes())
+
+    def test_metadata_uses_parsed_snapshot_when_source_changes(self):
+        data = self.work / "data"
+        shutil.copytree(DATA, data)
+        snapshots = {name: (data / name).read_bytes() for name in FILES}
+        read_csv = plot.pd.read_csv
+
+        def read_then_replace(*args, **kwargs):
+            frame = read_csv(*args, **kwargs)
+            # Coordinate replacement after parsing, before later provenance work.
+            (data / "controlled.csv").write_bytes(snapshots["controlled.csv"] + b"\n")
+            return frame
+
+        with mock.patch.object(plot.pd, "read_csv", side_effect=read_then_replace):
+            plot.draw(data, self.work, False, None, "en")
+        root = ET.parse(self.work / f"{FIGURES[0]}.svg").getroot()
+        description = root.find(".//{http://purl.org/dc/elements/1.1/}description").text
+        metadata = json.loads(description.split("\n", 1)[1])
+        self.assertEqual(metadata["source_sha256"]["controlled.csv"],
+                         hashlib.sha256(snapshots["controlled.csv"]).hexdigest())
+
+    def test_large_values_error_bars_and_labels_fit_axes(self):
+        data = self.work / "large"
+        shutil.copytree(DATA, data)
+        for name in FILES:
+            path = data / name
+            with path.open() as stream:
+                reader = csv.DictReader(stream)
+                fields, rows = reader.fieldnames, list(reader)
+            for row in rows:
+                if name == "controlled.csv":
+                    row["tps_per_gpu_mean"] = "900"
+                    row["tps_per_gpu_sample_std"] = "2000"
+                else:
+                    row["tps_per_gpu"] = "2000"
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+
+        figures = {}
+
+        def inspect_figure(figure, output_dir, name, *args):
+            figures[name] = figure
+            self.addCleanup(plot.plt.close, figure)
+
+        with mock.patch.object(plot, "save_figure", side_effect=inspect_figure):
+            plot.draw(data, self.work, False, None, "en")
+        fixed = figures["fixed-cache"]
+        fixed.set_dpi(180)
+        fixed.canvas.draw()
+        renderer = fixed.canvas.get_renderer()
+        for axis in fixed.axes:
+            low, high = axis.get_ylim()
+            self.assertLessEqual(low, -1100)
+            self.assertGreaterEqual(high, 2900)
+            for label in axis.texts:
+                bounds = label.get_window_extent(renderer)
+                self.assertGreaterEqual(bounds.y0, axis.bbox.y0)
+                self.assertLessEqual(bounds.y1, axis.bbox.y1)
+            self.assertTrue(any(tick > 700 for tick in axis.get_yticks()))
+        for axis in figures["standard"].axes:
+            low, high = axis.get_ylim()
+            for line in axis.lines:
+                self.assertTrue(all(low <= value <= high for value in line.get_ydata()))
 
     def test_invalid_inputs_preserve_existing_output(self):
         for case in ("missing", "duplicate", "negative", "invalid_regular"):
