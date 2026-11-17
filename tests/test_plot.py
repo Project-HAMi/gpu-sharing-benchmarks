@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "results/2026-11-a100-sharing"
 FILES = ("controlled.csv", "fullstack.csv", "fullstack-unlimited.csv")
+FIGURES = ("gpu-sharing-benchmarks-fixed-cache", "gpu-sharing-benchmarks-standard")
 
 
 class PlotTest(unittest.TestCase):
@@ -25,7 +26,7 @@ class PlotTest(unittest.TestCase):
             cwd=self.work,
             capture_output=True,
             text=True,
-            env={**os.environ, "MPLCONFIGDIR": str(self.work / "mpl-cache")},
+            env={**os.environ, "MPLCONFIGDIR": os.environ.get("MPLCONFIGDIR", str(self.work / "mpl-cache"))},
             timeout=60,
         )
 
@@ -35,21 +36,27 @@ class PlotTest(unittest.TestCase):
         self.work = Path(self.temp.name)
 
     def test_default_data_and_reproducible_exports(self):
-        output = self.work / "nested/throughput.svg"
-        preview = self.work / "preview/throughput.png"
-        result = self.run_plot("--output", output, "--preview", preview)
+        output_dir = self.work / "nested"
+        result = self.run_plot("--output-dir", output_dir, "--preview")
         self.assertEqual(result.returncode, 0, result.stderr)
-        original = output.read_bytes()
-        self.assertTrue(preview.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
-        description = ET.fromstring(original).find(
-            ".//{http://purl.org/dc/elements/1.1/}description"
-        ).text
-        metadata = json.loads(description.split("\n", 1)[1])
-        for name in FILES:
-            self.assertEqual(
-                metadata["source_sha256"][name],
-                hashlib.sha256((DATA / name).read_bytes()).hexdigest(),
-            )
+        originals = {}
+        metadata = {}
+        for figure, kind in zip(FIGURES, ("controlled", "regular")):
+            original = (output_dir / f"{figure}.svg").read_bytes()
+            originals[figure] = original
+            self.assertTrue((output_dir / f"{figure}.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            root = ET.fromstring(original)
+            description = root.find(".//{http://purl.org/dc/elements/1.1/}description").text
+            plotted = json.loads(description.split("\n", 1)[1])
+            metadata[kind] = plotted[kind]
+            self.assertEqual(set(plotted), {"source_sha256", kind})
+            inputs = FILES[:1] if kind == "controlled" else FILES[1:]
+            self.assertEqual(set(plotted["source_sha256"]), set(inputs))
+            for name in inputs:
+                self.assertEqual(plotted["source_sha256"][name], hashlib.sha256((DATA / name).read_bytes()).hexdigest())
+            ids = {element.get("id") for element in root.iter()}
+            self.assertEqual({i for i in ids if i and i.startswith("axes_")}, {"axes_1", "axes_2"})
+            self.assertEqual("legend_1" in ids, kind == "regular")
         with (DATA / "controlled.csv").open() as stream:
             fixed = {(r["mode"], r["configuration"]): r for r in csv.DictReader(stream)}
         regular = {}
@@ -67,18 +74,19 @@ class PlotTest(unittest.TestCase):
         for point in metadata["regular"]:
             row = regular[(point["mode"], point["configuration"], point["concurrency"])]
             self.assertEqual(point["tps"], float(row["tps_per_gpu"]))
-        result = self.run_plot("--output", output)
+        result = self.run_plot("--output-dir", output_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(original, output.read_bytes())
+        for figure, original in originals.items():
+            self.assertEqual(original, (output_dir / f"{figure}.svg").read_bytes())
 
     def test_invalid_inputs_preserve_existing_output(self):
-        for case in ("missing", "duplicate", "negative"):
+        for case in ("missing", "duplicate", "negative", "invalid_regular"):
             with self.subTest(case=case):
                 data = self.work / case
                 data.mkdir()
                 for name in FILES:
                     shutil.copy(DATA / name, data / name)
-                path = data / "controlled.csv"
+                path = data / ("fullstack.csv" if case == "invalid_regular" else "controlled.csv")
                 with path.open() as stream:
                     reader = csv.DictReader(stream)
                     fields = reader.fieldnames
@@ -87,17 +95,21 @@ class PlotTest(unittest.TestCase):
                     rows.pop()
                 elif case == "duplicate":
                     rows.append(rows[0].copy())
-                else:
+                elif case == "negative":
                     rows[0]["tps_per_gpu_mean"] = "-1"
+                else:
+                    rows[0]["tps_per_gpu"] = "nan"
                 with path.open("w", newline="") as stream:
                     writer = csv.DictWriter(stream, fieldnames=fields)
                     writer.writeheader()
                     writer.writerows(rows)
-                output = data / "preserved.svg"
-                output.write_text("existing figure")
-                result = self.run_plot("--data-dir", data, "--output", output)
+                outputs = [data / f"{figure}.svg" for figure in FIGURES]
+                for output in outputs:
+                    output.write_text("existing figure")
+                result = self.run_plot("--data-dir", data, "--output-dir", data)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(output.read_text(), "existing figure")
+                for output in outputs:
+                    self.assertEqual(output.read_text(), "existing figure")
                 self.assertIn("plot.py:", result.stderr)
 
 

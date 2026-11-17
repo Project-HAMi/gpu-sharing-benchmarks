@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate the four-panel throughput figure from the benchmark CSVs.
+"""Generate separate fixed-cache and standard-test throughput figures.
 
-Install requirements-plot.txt, then run: python plot.py --preview out/throughput.png
+Install requirements-plot.txt, then run: python plot.py --preview
 Use --language zh for Chinese labels and --font to select a Chinese font file.
 """
 
@@ -22,7 +22,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA = ROOT / "results/2026-11-a100-sharing"
-DEFAULT_OUTPUT = ROOT / "out/throughput.svg"
+DEFAULT_OUTPUT = ROOT / "out"
 INPUT_FILES = ("controlled.csv", "fullstack.csv", "fullstack-unlimited.csv")
 # Colorblind-friendly colors, with markers and line styles for monochrome copies.
 SERIES = [
@@ -67,7 +67,23 @@ def configure_fonts(font_path, language):
     })
 
 
-def draw(data_dir, output, preview, font_path, language):
+def save_figure(figure, output_dir, name, title, description, plotted, preview):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"gpu-sharing-benchmarks-{name}.svg"
+    figure.savefig(output, format="svg", metadata={
+        "Title": title,
+        "Description": description + "\n" + json.dumps(plotted, ensure_ascii=False, sort_keys=True),
+        "Date": None,
+    })
+    # Keep generated SVGs clean in Git while preserving deterministic output.
+    output.write_text("\n".join(line.rstrip() for line in output.read_text(encoding="utf-8").splitlines()) + "\n", encoding="utf-8")
+    if preview:
+        figure.savefig(output.with_suffix(".png"), dpi=180)
+    plt.close(figure)
+    print(f"Saved {output}")
+
+
+def draw(data_dir, output_dir, preview, font_path, language):
     configure_fonts(font_path, language)
     labels = {
         "en": {
@@ -113,17 +129,24 @@ def draw(data_dir, output, preview, font_path, language):
                 value = float(regular.loc[(mode, key, concurrency), "tps_per_gpu"])
                 if not math.isfinite(value) or value < 0:
                     raise ValueError(f"Invalid throughput: {mode}, {key}, {concurrency}")
-    figure, axes = plt.subplots(2, 2, figsize=(10.5, 8.4))
-    figure.subplots_adjust(left=0.09, right=0.98, top=0.94, bottom=0.16, wspace=0.27, hspace=0.56)
-    plotted = {
-        "source_sha256": {name: hashlib.sha256((data_dir / name).read_bytes()).hexdigest() for name in INPUT_FILES},
-        "controlled": [], "regular": [],
+    fixed_figure, fixed_axes = plt.subplots(1, 2, figsize=(10.5, 4.1))
+    fixed_figure.subplots_adjust(left=0.09, right=0.98, top=0.86, bottom=0.18, wspace=0.27)
+    regular_figure, regular_axes = plt.subplots(1, 2, figsize=(10.5, 4.8))
+    regular_figure.subplots_adjust(left=0.09, right=0.98, top=0.88, bottom=0.32, wspace=0.27)
+    hashes = {name: hashlib.sha256((data_dir / name).read_bytes()).hexdigest() for name in INPUT_FILES}
+    fixed_plotted = {
+        "source_sha256": {"controlled.csv": hashes["controlled.csv"]},
+        "controlled": [],
+    }
+    regular_plotted = {
+        "source_sha256": {name: hashes[name] for name in INPUT_FILES[1:]},
+        "regular": [],
     }
     fixed_keys = ["Native single", "Native pair", "HAMi pair (50%)", "Legacy MPS pair"]
     bar_colors = ["#BBBBBB", "#555555", "#0072B2", "#D55E00"]
 
     for column, mode in enumerate(["Graph", "Eager"]):
-        axis = axes[0, column]
+        axis = fixed_axes[column]
         values = controlled.loc[mode].reindex(fixed_keys)
         bars = axis.bar(
             range(4), values["tps_per_gpu_mean"],
@@ -142,14 +165,14 @@ def draw(data_dir, output, preview, font_path, language):
             mean, std = float(row["tps_per_gpu_mean"]), float(row["tps_per_gpu_sample_std"])
             axis.text(x, mean + std + 13, f"{mean:.2f}", ha="center", va="bottom", fontsize=10)
             bars[x].set_gid(f"controlled-{mode}-{x}")
-            plotted["controlled"].append({"mode": mode, "configuration": key, "mean": mean, "sample_std": std})
+            fixed_plotted["controlled"].append({"mode": mode, "configuration": key, "mean": mean, "sample_std": std})
         axis.set_axisbelow(True)
         axis.grid(axis="y", color="0.88", linewidth=0.5)
 
     levels = [2, 4, 8, 16, 32]
     handles = []
     for column, mode in enumerate(["Graph", "Eager"]):
-        axis = axes[1, column]
+        axis = regular_axes[column]
         for series_index, (key, label, color, marker, style) in enumerate(SERIES):
             values = regular.loc[(mode, key)].reindex(levels)["tps_per_gpu"]
             line, = axis.plot(
@@ -160,50 +183,42 @@ def draw(data_dir, output, preview, font_path, language):
             line.set_gid(f"regular-{mode}-{series_index}")
             if column == 0:
                 handles.append(line)
-            plotted["regular"].extend({"mode": mode, "configuration": key, "concurrency": int(c), "tps": float(v)} for c, v in values.items())
+            regular_plotted["regular"].extend({"mode": mode, "configuration": key, "concurrency": int(c), "tps": float(v)} for c, v in values.items())
         axis.set_xscale("log", base=2)
         axis.set_xlim(1.8, 35.5)
         axis.xaxis.set_major_locator(FixedLocator(levels))
         axis.xaxis.set_major_formatter(ScalarFormatter())
         axis.minorticks_off()
         axis.set_ylim(0, 1200 if mode == "Graph" else 700)
-        axis.set_title(f"({'cd'[column]}) {labels['regular']} · {mode}", pad=12)
+        axis.set_title(f"({'ab'[column]}) {labels['regular']} · {mode}", pad=12)
         axis.set_xlabel(labels["concurrency"])
         axis.set_ylabel(labels["throughput"])
         axis.set_axisbelow(True)
         axis.grid(axis="y", color="0.88", linewidth=0.5)
 
-    figure.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.52, 0.025), ncol=3, columnspacing=1.5, handlelength=2.5)
-    description = (
-        "Top row: fixed 6 GiB KV cache per instance, concurrency 8 per GPU; "
-        "bars show the three-trial mean and error bars show +/-1 sample standard deviation. "
-        "Bottom row: automatic KV cache, concurrency 2/4/8/16/32 per GPU, one trial per configuration.\n"
-        + json.dumps(plotted, ensure_ascii=False, sort_keys=True)
+    regular_figure.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.52, 0.025), ncol=3, columnspacing=1.5, handlelength=2.5)
+    save_figure(
+        fixed_figure, output_dir, "fixed-cache", "GPU sharing throughput: fixed-cache test",
+        "Fixed 6 GiB KV cache per instance, concurrency 8 per GPU; "
+        "bars show the three-trial mean and error bars show +/-1 sample standard deviation.",
+        fixed_plotted, preview,
     )
-    output.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output, format="svg", metadata={"Title": "GPU sharing throughput: fixed-cache and standard tests", "Description": description, "Date": None})
-    if preview:
-        preview.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(preview, dpi=180)
-    plt.close(figure)
-    print(f"Saved {output}: 8 bars, 50 line-chart points")
+    save_figure(
+        regular_figure, output_dir, "standard", "GPU sharing throughput: standard test",
+        "Automatic KV cache, concurrency 2/4/8/16/32 per GPU, one trial per configuration and concurrency level.",
+        regular_plotted, preview,
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--preview", type=Path)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--preview", action="store_true", help="Also save a PNG preview of each figure")
     parser.add_argument("--font", help="Optional path to a Chinese font file")
     parser.add_argument("--language", choices=["en", "zh"], default="en")
     args = parser.parse_args()
-    if args.output.suffix.lower() != ".svg":
-        parser.error("--output must have the .svg extension")
-    if args.preview and args.preview.suffix.lower() != ".png":
-        parser.error("--preview must have the .png extension")
-    if args.preview and args.preview.resolve() == args.output.resolve():
-        parser.error("--output and --preview must be different files")
     try:
-        draw(args.data_dir, args.output, args.preview, args.font, args.language)
+        draw(args.data_dir, args.output_dir, args.preview, args.font, args.language)
     except (ValueError, KeyError, OSError) as exc:
         parser.exit(1, f"plot.py: {exc}\n")

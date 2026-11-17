@@ -6,7 +6,7 @@
 
 ## Plot throughput results
 
-The plotting script reads the committed CSVs and generates a four-panel figure:
+The plotting script reads the committed CSVs and generates two figures:
 fixed-cache Graph/Eager throughput with sample-standard-deviation error bars, and
 standard Graph/Eager throughput across the five concurrency levels. It runs on a
 CPU and does not require CUDA or a Kubernetes cluster.
@@ -16,26 +16,32 @@ Use Python 3.12 or newer:
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-plot.txt
-.venv/bin/python plot.py --preview out/throughput.png
+.venv/bin/python plot.py --preview
 ```
 
-The default input is `results/2026-11-a100-sharing/`, and the default output is
-`out/throughput.svg`. English labels use Matplotlib's bundled DejaVu Serif font.
-The SVG embeds glyph outlines and includes the input CSV SHA-256 hashes and
-plotted values in its metadata.
+The default input is `results/2026-11-a100-sharing/`. Each run generates two
+independent figures in `out/`:
+
+- `gpu-sharing-benchmarks-fixed-cache.svg`: Graph and Eager bars with sample standard deviations.
+- `gpu-sharing-benchmarks-standard.svg`: Graph and Eager lines across five concurrency levels, with a shared legend.
+
+`--preview` also saves a PNG for each figure beside its SVG. Use `--output-dir`
+to choose the output directory. English labels use Matplotlib's bundled DejaVu
+Serif font. Each SVG embeds glyph outlines and includes the corresponding input
+CSV SHA-256 hashes and plotted values in its metadata.
 
 For Chinese labels, install a Chinese font such as Noto Serif CJK SC, or pass a
 font file explicitly:
 
 ```sh
 .venv/bin/python plot.py --language zh --font /path/to/chinese-font.otf \
-  --output out/throughput-zh.svg --preview out/throughput-zh.png
+  --output-dir out/zh --preview
 ```
 
 Use `--data-dir` to select another directory containing `controlled.csv`,
 `fullstack.csv`, and `fullstack-unlimited.csv`. The script expects the same
 configuration names and concurrency levels as the committed dataset. It checks
-for missing, duplicate, and invalid plotted values before writing the figure.
+for missing, duplicate, and invalid plotted values before writing either figure.
 
 Run the plotting checks with:
 
