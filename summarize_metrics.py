@@ -42,6 +42,8 @@ def points(root, total_concurrency=None, allow_partial=False):
             proof = root / name / ("checks/hami/stack-before.json" if fullstack else "proof-before.json")
             data = json.loads(proof.read_text())
             workers = data["workers"] if fullstack else data
+            if len(workers) != case["models"]:
+                raise ValueError(f"{name}: expected {case['models']} worker proof entries, found {len(workers)}")
             if any(w["environment"].get("CUDA_DEVICE_SM_LIMIT") != str(expected_limit) for w in workers):
                 raise ValueError(f"{name}: recorded compute limit does not match the declared profile")
         for c in case["concurrencies"]:
